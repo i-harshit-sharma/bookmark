@@ -20,23 +20,24 @@ mongoose
   .then(() => console.log("📦 Connected to MongoDB..."))
   .catch((err) => console.error("❌ Could not connect to MongoDB:", err));
 
-// Database Schema (Updated with tags array)
+// Database Schema (Updated with a deleted flag)
 const bookmarkSchema = new mongoose.Schema({
   url: { type: String, required: true },
   tags: [{ type: String, trim: true }],
+  deleted: { type: Boolean, default: false }, // Soft-delete state tracer
   createdAt: { type: Date, default: Date.now },
 });
 const Bookmark = mongoose.model("Bookmark", bookmarkSchema);
 
-// Main Route: Displays the form and all saved bookmarks
+// Main Route: Displays the form and active bookmarks
 app.get("/", async (req, res) => {
   try {
-    const bookmarks = await Bookmark.find().sort({ createdAt: -1 });
+    // CRITICAL: We now filter out any records where deleted is explicitly true
+    const bookmarks = await Bookmark.find({ deleted: { $ne: true } }).sort({ createdAt: -1 });
 
     // Generate dynamic HTML list items
     let listItems = bookmarks
       .map((b) => {
-        // Generate tag badges if tags exist
         const tagsHTML = b.tags && b.tags.length > 0
           ? `<div class="tags-list">${b.tags.map(tag => `<span class="tag-badge">#${tag}</span>`).join("")}</div>`
           : "";
@@ -49,8 +50,10 @@ app.get("/", async (req, res) => {
             </div>
             <div class="bookmark-actions">
               <span class="date">${new Date(b.createdAt).toLocaleDateString()}</span>
-              <form action="/delete/${b._id}" method="POST" style="margin: 0;">
-                <button type="submit" class="delete-btn" onclick="return confirm('Delete this bookmark?')">🗑️</button>
+              
+              <form action="/delete/${b._id}" method="POST" style="margin: 0;" onsubmit="return confirmDelete(this)">
+                <input type="hidden" name="deletePassword" class="password-submit-field">
+                <button type="submit" class="delete-btn">🗑️</button>
               </form>
             </div>
           </li>
@@ -74,7 +77,6 @@ app.get("/", async (req, res) => {
           body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; max-width: 650px; margin: 40px auto; padding: 0 20px; background-color: #f4f6f8; color: #333; }
           h1 { color: #2c3e50; text-align: center; font-size: 28px; margin-bottom: 25px; }
           
-          /* Form layout updates for multi-input stability */
           form.add-form { display: flex; flex-direction: column; gap: 12px; margin-bottom: 35px; background: white; padding: 20px; border-radius: 8px; box-shadow: 0 2px 8px rgba(0,0,0,0.04); }
           .form-group { display: flex; flex-direction: column; gap: 6px; }
           .form-group label { font-size: 13px; font-weight: 600; color: #555; }
@@ -84,23 +86,31 @@ app.get("/", async (req, res) => {
           form.add-form button { padding: 12px; background-color: #007bff; color: white; border: none; border-radius: 6px; cursor: pointer; font-size: 16px; font-weight: bold; margin-top: 5px; transition: background 0.2s; }
           form.add-form button:hover { background-color: #0056b3; }
           
-          /* Bookmark Row formatting */
           ul { list-style: none; padding: 0; }
           li { background: white; padding: 16px; margin-bottom: 12px; border-radius: 8px; box-shadow: 0 2px 8px rgba(0,0,0,0.05); display: flex; justify-content: space-between; align-items: center; gap: 20px; }
           .bookmark-content { display: flex; flex-direction: column; gap: 8px; flex: 1; min-width: 0; }
           .bookmark-url { color: #007bff; text-decoration: none; word-break: break-all; font-weight: 500; font-size: 16px; }
           .bookmark-url:hover { text-decoration: underline; }
           
-          /* Tag pills styling */
           .tags-list { display: flex; flex-wrap: wrap; gap: 6px; }
           .tag-badge { background-color: #eaf2ff; color: #0056b3; padding: 3px 8px; border-radius: 4px; font-size: 12px; font-weight: 500; }
           
-          /* Actions column formatting */
-          .bookmark-actions { display: flex; align-items: center; gap: 15px; transform: translateY(-1px); }
+          .bookmark-actions { display: flex; align-items: center; gap: 15px; }
           .date { font-size: 12px; color: #888; white-space: nowrap; }
           .delete-btn { background: none; border: none; cursor: pointer; font-size: 16px; padding: 6px; border-radius: 4px; transition: background 0.2s; }
           .delete-btn:hover { background-color: #ffeef0; }
         </style>
+        
+        <script>
+          function confirmDelete(formElement) {
+            const pwd = prompt("🔒 Enter the admin password to delete this bookmark:");
+            if (pwd === null || pwd.trim() === "") {
+              return false; 
+            }
+            formElement.querySelector('.password-submit-field').value = pwd;
+            return true;
+          }
+        </script>
       </head>
       <body>
         <h1>🔖 SyncBookmarks</h1>
@@ -112,7 +122,7 @@ app.get("/", async (req, res) => {
           </div>
           <div class="form-group">
             <label for="tags">Tags</label>
-            <input type="text" id="tags" name="tags" placeholder="e.g. tech, development, reading (comma separated)">
+            <input type="text" id="tags" name="tags" placeholder="e.g. tech, coding, design (comma separated)">
           </div>
           <button type="submit">Save Bookmark</button>
         </form>
@@ -129,7 +139,7 @@ app.get("/", async (req, res) => {
   }
 });
 
-// Post Route: Handles saving new URLs and associated tags
+// Post Route: Handles saving new URLs
 app.post("/add", async (req, res) => {
   let { url, tags } = req.body;
 
@@ -137,11 +147,8 @@ app.post("/add", async (req, res) => {
     url = "https://" + url;
   }
 
-  // Parse comma-separated string tags into an array of strings, trimming whitespace and filtering empties
   const processedTags = tags
-    ? tags.split(",")
-        .map(tag => tag.trim().toLowerCase())
-        .filter(tag => tag.length > 0)
+    ? tags.split(",").map(tag => tag.trim().toLowerCase()).filter(tag => tag.length > 0)
     : [];
 
   try {
@@ -153,13 +160,27 @@ app.post("/add", async (req, res) => {
   }
 });
 
-// Post Route: Handles deleting an individual entry
+// Post Route: Updated to handle SOFT deletion
 app.post("/delete/:id", async (req, res) => {
+  const { deletePassword } = req.body;
+  const masterPassword = process.env.DELETE_PASSWORD || "admin123";
+
+  if (deletePassword !== masterPassword) {
+    return res.status(403).send(`
+      <div style="font-family: sans-serif; text-align: center; margin-top: 50px;">
+        <h2>❌ Access Denied</h2>
+        <p>Incorrect deletion password.</p>
+        <a href="/" style="color: #007bff; text-decoration: none; font-weight: bold;">Go Back</a>
+      </div>
+    `);
+  }
+
   try {
-    await Bookmark.findByIdAndDelete(req.params.id);
+    // Changing standard findByIdAndDelete to a standard property update query field adjustment
+    await Bookmark.findByIdAndUpdate(req.params.id, { deleted: true });
     res.redirect("/");
   } catch (err) {
-    res.status(500).send("Error deleting the bookmark.");
+    res.status(500).send("Error dropping bookmark entry.");
   }
 });
 
